@@ -1,8 +1,10 @@
-# Hirelens — AI Interview Preparation Platform 🚀
+# HireReady AI — AI Interview Preparation Platform 🚀
 
 A modern, full-stack MERN application designed to help candidates prepare for technical and behavioral interviews. The platform leverages the **Google Gemini API** and **Web Speech API** to provide real-time voice and video mock interviews, complete with detailed ATS resume parsing, actionable feedback scorecards, and a **Razorpay-powered freemium monetization system**.
 
-> **Live Demo**: [hirelens.vercel.app](https://gen-ai-project-with-mern.vercel.app) · **Backend API**: Hosted on Render
+> 🌐 **Live Frontend**: [https://hire-ready-ai-beryl.vercel.app](https://hire-ready-ai-beryl.vercel.app)  
+> ⚙️ **Backend API**: [https://hireready-ai-gmh7.onrender.com](https://hireready-ai-gmh7.onrender.com)  
+> 📦 **GitHub Repository**: [https://github.com/vanshjain198/HireReady-AI](https://github.com/vanshjain198/HireReady-AI)
 
 ---
 
@@ -246,11 +248,11 @@ cd Frontend && npm test
 
 ## 🌐 Deployment
 
-| Service | Platform | Notes |
+| Service | Platform | Live URL |
 |---|---|---|
-| **Frontend** | Vercel | Add `VITE_RAZORPAY_KEY_ID` in Environment Variables → Redeploy |
-| **Backend** | Render | Add `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` in Environment |
-| **Database** | MongoDB Atlas | Free M0 cluster works perfectly |
+| **Frontend** | Vercel | [https://hire-ready-ai-beryl.vercel.app](https://hire-ready-ai-beryl.vercel.app) |
+| **Backend** | Render | [https://hireready-ai-gmh7.onrender.com](https://hireready-ai-gmh7.onrender.com) |
+| **Database** | MongoDB Atlas | AWS Mumbai (`ap-south-1`) Cluster |
 
 > **Important**: Vite bakes `VITE_*` env vars at **build time**. After adding/changing them on Vercel, you must trigger a **redeploy** for changes to take effect.
 
@@ -258,7 +260,7 @@ cd Frontend && npm test
 
 ## 🤝 Contributing
 
-Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](https://github.com/Naveen34822/GenAi-Project-with-MERN/issues).
+Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](https://github.com/vanshjain198/HireReady-AI/issues).
 
 ---
 
