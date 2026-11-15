@@ -1,12 +1,9 @@
 const pdfParseModule = require("pdf-parse")
 const pdfParse = pdfParseModule.default || pdfParseModule
-const {
-  generateInterviewReport,
-  generateResumePdf,
-  evaluateMockInterviewAnswer,
-  evaluateMockInterview
-} = require("../services/ai.service")
+const { generateInterviewReport, evaluateAnswer, generateLiveChatReply } = require("../services/ai.service")
 const interviewReportModel = require("../models/interviewReport.model")
+const userModel = require("../models/user.model")
+const { sendInterviewReportEmail, sendInterviewTranscriptEmail } = require("../services/email.service")
 
 async function generateInterViewReportController(req, res) {
   try {
@@ -16,14 +13,15 @@ async function generateInterViewReportController(req, res) {
       return res.status(400).json({ message: "Job description is required." })
     }
 
-    // Resume and self description are optional, but at least one is required.
+    // ✅ FIX: both resume and selfDescription are optional
+    // but at least one must be provided
     if (!req.file && !selfDescription) {
       return res.status(400).json({
         message: "Please provide either a resume PDF or a self description."
       })
     }
 
-    // Only parse PDF content when a file was uploaded.
+    // ✅ FIX: only parse PDF if file was uploaded
     let resumeText = ""
     if (req.file) {
       const resumeContent = await pdfParse(req.file.buffer)
@@ -48,6 +46,27 @@ async function generateInterViewReportController(req, res) {
       message: "Interview report generated successfully.",
       interviewReport
     })
+
+    // 🔥 Send email notification in the background
+    // We don't await this because we don't want to block the HTTP response!
+    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173"
+    const reportLink = `${frontendUrl}/interview/${interviewReport._id}`
+    
+    // Fetch the full user from the database because req.user (from JWT) doesn't contain the email
+    userModel.findById(req.user.id).then(user => {
+      if (user && user.email) {
+        console.log(`[EMAIL] Queueing interview report email for ${user.email} (user: ${user.username})`);
+        sendInterviewReportEmail(
+          user.email,
+          user.username || "there",
+          interviewReport.title || interviewReport.jobPosition || "Software Engineer",
+          interviewReport.matchScore || 0,
+          reportLink
+        ).catch(e => console.error("Background email failed:", e))
+      } else {
+        console.warn(`[EMAIL] No user or email found for id: ${req.user ? req.user.id : 'unknown'}`);
+      }
+    }).catch(e => console.error("Failed to fetch user for email:", e))
   } catch (err) {
     console.error("generateInterViewReportController error:", err)
     res.status(500).json({ message: "Failed to generate interview report." })
@@ -93,163 +112,71 @@ async function getAllInterviewReportsController(req, res) {
   }
 }
 
-async function generateResumePdfController(req, res) {
+async function evaluateAnswerController(req, res) {
   try {
-    const { interviewReportId } = req.params
-    const interviewReport = await interviewReportModel.findOne({
-      _id: interviewReportId,
-      user: req.user.id
-    })
+    const { question, userAnswer, intention, modelAnswer } = req.body
 
-    if (!interviewReport) {
-      return res.status(404).json({ message: "Interview report not found." })
+    if (!question || !userAnswer) {
+      return res.status(400).json({ message: "Question and User Answer are required." })
     }
 
-    const { resume, jobDescription, selfDescription } = interviewReport
-    const pdfBuffer = await generateResumePdf({ resume, jobDescription, selfDescription })
-
-    res.set({
-      "Content-Type": "application/pdf",
-      "Content-Disposition": `attachment; filename=resume_${interviewReportId}.pdf`
-    })
-
-    res.send(pdfBuffer)
-  } catch (err) {
-    console.error("generateResumePdfController error:", err)
-    res.status(500).json({ message: "Failed to generate resume PDF." })
-  }
-}
-
-async function evaluateMockAnswerController(req, res) {
-  try {
-    const { interviewReportId } = req.params
-    const { questionType, questionIndex, answer } = req.body
-
-    if (![ "technical", "behavioral" ].includes(questionType)) {
-      return res.status(400).json({ message: "Question type must be technical or behavioral." })
-    }
-
-    if (!Number.isInteger(questionIndex) || questionIndex < 0) {
-      return res.status(400).json({ message: "A valid question index is required." })
-    }
-
-    if (!answer || !answer.trim()) {
-      return res.status(400).json({ message: "Answer is required." })
-    }
-
-    const interviewReport = await interviewReportModel.findOne({
-      _id: interviewReportId,
-      user: req.user.id
-    })
-
-    if (!interviewReport) {
-      return res.status(404).json({ message: "Interview report not found." })
-    }
-
-    const questionList = questionType === "technical"
-      ? interviewReport.technicalQuestions
-      : interviewReport.behavioralQuestions
-    const selectedQuestion = questionList[ questionIndex ]
-
-    if (!selectedQuestion) {
-      return res.status(404).json({ message: "Interview question not found." })
-    }
-
-    const feedback = await evaluateMockInterviewAnswer({
-      jobDescription: interviewReport.jobDescription,
-      resume: interviewReport.resume,
-      selfDescription: interviewReport.selfDescription,
-      questionType,
-      question: selectedQuestion.question,
-      intention: selectedQuestion.intention,
-      modelAnswer: selectedQuestion.answer,
-      userAnswer: answer.trim()
-    })
+    const evaluation = await evaluateAnswer({ question, userAnswer, intention, modelAnswer })
 
     res.status(200).json({
-      message: "Mock interview answer evaluated successfully.",
-      feedback
-    })
-  } catch (err) {
-    console.error("evaluateMockAnswerController error:", err)
-    res.status(500).json({ message: "Failed to evaluate mock interview answer." })
-  }
-}
-
-async function completeMockInterviewController(req, res) {
-  try {
-    const { interviewReportId } = req.params
-    const { answers } = req.body
-
-    if (!Array.isArray(answers) || answers.length < 6 || answers.length > 8) {
-      return res.status(400).json({
-        message: "A completed mock interview must contain between 6 and 8 answers."
-      })
-    }
-
-    const interviewReport = await interviewReportModel.findOne({
-      _id: interviewReportId,
-      user: req.user.id
-    })
-
-    if (!interviewReport) {
-      return res.status(404).json({ message: "Interview report not found." })
-    }
-
-    const seenQuestions = new Set()
-    const responses = []
-
-    for (const item of answers) {
-      if (![ "technical", "behavioral" ].includes(item.questionType)) {
-        return res.status(400).json({ message: "Every answer must have a valid question type." })
-      }
-
-      if (!Number.isInteger(item.questionIndex) || item.questionIndex < 0) {
-        return res.status(400).json({ message: "Every answer must have a valid question index." })
-      }
-
-      if (typeof item.answer !== "string" || !item.answer.trim()) {
-        return res.status(400).json({ message: "Every interview question must be answered." })
-      }
-
-      const questionKey = `${item.questionType}-${item.questionIndex}`
-      if (seenQuestions.has(questionKey)) {
-        return res.status(400).json({ message: "The same interview question cannot be submitted twice." })
-      }
-      seenQuestions.add(questionKey)
-
-      const questionList = item.questionType === "technical"
-        ? interviewReport.technicalQuestions
-        : interviewReport.behavioralQuestions
-      const question = questionList[item.questionIndex]
-
-      if (!question) {
-        return res.status(400).json({ message: "One or more interview questions were not found." })
-      }
-
-      responses.push({
-        questionType: item.questionType,
-        question: question.question,
-        intention: question.intention,
-        modelAnswer: question.answer,
-        userAnswer: item.answer.trim()
-      })
-    }
-
-    const evaluation = await evaluateMockInterview({
-      jobDescription: interviewReport.jobDescription,
-      resume: interviewReport.resume,
-      selfDescription: interviewReport.selfDescription,
-      responses
-    })
-
-    res.status(200).json({
-      message: "Mock interview completed successfully.",
+      message: "Answer evaluated successfully.",
       evaluation
     })
   } catch (err) {
-    console.error("completeMockInterviewController error:", err)
-    res.status(500).json({ message: "Failed to complete mock interview." })
+    console.error("evaluateAnswerController error:", err)
+    res.status(500).json({ message: "Failed to evaluate answer." })
+  }
+}
+
+async function generateLiveChatReplyController(req, res) {
+  try {
+    const { history, jobDescription, resume } = req.body
+
+    if (!history || !Array.isArray(history) || !jobDescription) {
+      return res.status(400).json({ message: "History array and Job Description are required." })
+    }
+
+    const reply = await generateLiveChatReply({ history, jobDescription, resume })
+
+    res.status(200).json({
+      message: "Chat reply generated successfully.",
+      reply
+    })
+  } catch (err) {
+    console.error("generateLiveChatReplyController error:", err)
+    res.status(500).json({ message: "Failed to generate AI reply." })
+  }
+}
+
+async function sendTranscriptEmailController(req, res) {
+  try {
+    const { transcript, role } = req.body;
+    
+    if (!transcript || !Array.isArray(transcript)) {
+      return res.status(400).json({ message: "Transcript array is required." });
+    }
+
+    const user = await userModel.findById(req.user.id);
+    if (!user || !user.email) {
+      return res.status(400).json({ message: "User email not found." });
+    }
+
+    // Fire and forget
+    sendInterviewTranscriptEmail(
+      user.email,
+      user.username || "there",
+      role || "Software Engineer",
+      transcript
+    ).catch(e => console.error("Transcript email failed:", e));
+
+    res.status(200).json({ message: "Transcript email sent successfully!" });
+  } catch (err) {
+    console.error("sendTranscriptEmailController error:", err);
+    res.status(500).json({ message: "Failed to send transcript email." });
   }
 }
 
@@ -257,7 +184,7 @@ module.exports = {
   generateInterViewReportController,
   getInterviewReportByIdController,
   getAllInterviewReportsController,
-  generateResumePdfController,
-  evaluateMockAnswerController,
-  completeMockInterviewController
+  evaluateAnswerController,
+  generateLiveChatReplyController,
+  sendTranscriptEmailController
 }

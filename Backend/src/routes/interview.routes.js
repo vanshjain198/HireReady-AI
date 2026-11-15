@@ -2,6 +2,7 @@ const express = require("express")
 const authMiddleware = require("../middlewares/auth.middleware")
 const interviewController = require("../controllers/interview.controller")
 const upload = require("../middlewares/file.middleware")
+const { checkFreeLimit, requirePro } = require("../middlewares/plan.middleware")
 
 const interviewRouter = express.Router()
 
@@ -10,9 +11,9 @@ const interviewRouter = express.Router()
 /**
  * @route POST /api/interview/
  * @description generate new interview report on the basis of user self description,resume pdf and job description.
- * @access private
+ * @access private (Free: max 3/month | Pro: unlimited)
  */
-interviewRouter.post("/", authMiddleware.authUser, upload.single("resume"), interviewController.generateInterViewReportController)
+interviewRouter.post("/", authMiddleware.authUser, checkFreeLimit, upload.single("resume"), interviewController.generateInterViewReportController)
 
 /**
  * @route GET /api/interview/report/:interviewId
@@ -31,26 +32,24 @@ interviewRouter.get("/", authMiddleware.authUser, interviewController.getAllInte
 
 
 /**
- * @route GET /api/interview/resume/pdf
- * @description generate resume pdf on the basis of user self description, resume content and job description.
+ * @route POST /api/interview/evaluate
+ * @description Evaluate user's answer to a mock interview question
  * @access private
  */
-interviewRouter.post("/resume/pdf/:interviewReportId", authMiddleware.authUser, interviewController.generateResumePdfController)
-
+interviewRouter.post("/evaluate", authMiddleware.authUser, interviewController.evaluateAnswerController)
 
 /**
- * @route POST /api/interview/mock/:interviewReportId/evaluate
- * @description evaluate a user's mock interview answer for a saved interview report question.
- * @access private
+ * @route POST /api/interview/chat
+ * @description Send conversation history and get AI follow up response (Pro only — used in Live Voice & Video Interview)
+ * @access private (Pro only)
  */
-interviewRouter.post("/mock/:interviewReportId/evaluate", authMiddleware.authUser, interviewController.evaluateMockAnswerController)
+interviewRouter.post("/chat", authMiddleware.authUser, requirePro, interviewController.generateLiveChatReplyController)
 
 /**
- * @route POST /api/interview/mock/:interviewReportId/complete
- * @description evaluate all 6-8 answers and return the final interview verdict.
+ * @route POST /api/interview/send-transcript
+ * @description Send full interview transcript to the user's email
  * @access private
  */
-interviewRouter.post("/mock/:interviewReportId/complete", authMiddleware.authUser, interviewController.completeMockInterviewController)
-
+interviewRouter.post("/send-transcript", authMiddleware.authUser, interviewController.sendTranscriptEmailController)
 
 module.exports = interviewRouter

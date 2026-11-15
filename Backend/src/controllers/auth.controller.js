@@ -2,20 +2,12 @@ const userModel = require("../models/user.model")
 const bcrypt = require("bcryptjs")
 const jwt = require("jsonwebtoken")
 const tokenBlacklistModel = require("../models/blacklist.model")
-const mongoose = require("mongoose")
 
-function isDatabaseConnected() {
-  return mongoose.connection.readyState === 1
-}
-
-function getCookieOptions() {
-  const isProduction = process.env.NODE_ENV === "production"
-
-  return {
-    httpOnly: true,
-    sameSite: isProduction ? "none" : "lax",
-    secure: isProduction
-  }
+//httpOnly and sameSite so cookie works on cross-origin requests
+const cookieOptions = {
+  httpOnly: true,
+  sameSite: "none",
+  secure: true 
 }
 
 /**
@@ -25,12 +17,6 @@ function getCookieOptions() {
  */
 async function registerUserController(req, res) {
   try {
-    if (!isDatabaseConnected()) {
-      return res.status(503).json({
-        message: "Database is not connected. Please check MongoDB connection settings."
-      })
-    }
-
     const { username, email, password } = req.body
 
     if (!username || !email || !password) {
@@ -63,10 +49,12 @@ async function registerUserController(req, res) {
       { expiresIn: "1d" }
     )
 
-    res.cookie("token", token, getCookieOptions())
+    //pass cookieOptions to res.cookie()
+    res.cookie("token", token, cookieOptions)
 
     res.status(201).json({
       message: "User registered successfully",
+      token,
       user: {
         id: user._id,
         username: user.username,
@@ -86,12 +74,6 @@ async function registerUserController(req, res) {
  */
 async function loginUserController(req, res) {
   try {
-    if (!isDatabaseConnected()) {
-      return res.status(503).json({
-        message: "Database is not connected. Please check MongoDB connection settings."
-      })
-    }
-
     const { email, password } = req.body
 
     const user = await userModel.findOne({ email })
@@ -116,10 +98,12 @@ async function loginUserController(req, res) {
       { expiresIn: "1d" }
     )
 
-    res.cookie("token", token, getCookieOptions())
+    //pass cookieOptions to res.cookie()
+    res.cookie("token", token, cookieOptions)
 
     res.status(200).json({
       message: "User loggedIn successfully.",
+      token,
       user: {
         id: user._id,
         username: user.username,
@@ -139,20 +123,20 @@ async function loginUserController(req, res) {
  */
 async function logoutUserController(req, res) {
   try {
-    if (!isDatabaseConnected()) {
-      res.clearCookie("token", getCookieOptions())
-      return res.status(200).json({
-        message: "User logged out successfully"
-      })
-    }
+    let token = null
 
-    const token = req.cookies.token
+    if (req.headers.authorization && req.headers.authorization.startsWith("Bearer ")) {
+      token = req.headers.authorization.split(" ")[1]
+    } else if (req.cookies && req.cookies.token) {
+      token = req.cookies.token
+    }
 
     if (token) {
       await tokenBlacklistModel.create({ token })
     }
 
-    res.clearCookie("token", getCookieOptions())
+    //pass same cookieOptions to clearCookie()
+    res.clearCookie("token", cookieOptions)
 
     res.status(200).json({
       message: "User logged out successfully"
@@ -164,18 +148,42 @@ async function logoutUserController(req, res) {
 }
 
 /**
+ * @name googleCallbackController
+ * @description handles Google OAuth callback, signs JWT and redirects to frontend
+ * @access Public (called by Passport after Google auth)
+ */
+async function googleCallbackController(req, res) {
+  try {
+    const user = req.user // set by Passport strategy
+
+    if (!user) {
+      return res.redirect(`${process.env.FRONTEND_URL}/login?error=oauth_failed`)
+    }
+
+    const token = jwt.sign(
+      { id: user._id, username: user.username },
+      process.env.JWT_SECRET,
+      { expiresIn: "1d" }
+    )
+
+    // Set cookie for same-origin and also pass token in URL for the frontend to grab
+    res.cookie("token", token, cookieOptions)
+
+    // Redirect to frontend with token in query param
+    res.redirect(`${process.env.FRONTEND_URL}/oauth/callback?token=${token}`)
+  } catch (err) {
+    console.error("googleCallbackController error:", err)
+    res.redirect(`${process.env.FRONTEND_URL}/login?error=oauth_failed`)
+  }
+}
+
+/**
  * @name getMeController
  * @description get the current logged in user details.
  * @access Private
  */
 async function getMeController(req, res) {
   try {
-    if (!isDatabaseConnected()) {
-      return res.status(503).json({
-        message: "Database is not connected. Please check MongoDB connection settings."
-      })
-    }
-
     const user = await userModel.findById(req.user.id)
 
     if (!user) {
@@ -187,7 +195,8 @@ async function getMeController(req, res) {
       user: {
         id: user._id,
         username: user.username,
-        email: user.email
+        email: user.email,
+        avatar: user.avatar || null
       }
     })
   } catch (err) {
@@ -200,5 +209,6 @@ module.exports = {
   registerUserController,
   loginUserController,
   logoutUserController,
-  getMeController
+  getMeController,
+  googleCallbackController
 }

@@ -1,15 +1,37 @@
-import React, { useState, useRef } from 'react'
+import React, { useState, useRef, useEffect } from 'react'
 import "../style/home.scss"
 import { useInterview } from '../hooks/useInterview.js'
-import { useNavigate } from 'react-router'
+import { useNavigate, Link } from 'react-router'
+import { useAuth } from '../../auth/hooks/useAuth'
+import AnalyticsDashboard from '../components/AnalyticsDashboard'
+import toast from 'react-hot-toast'
+import { getPaymentStatus } from '../../payment/services/payment.service'
+import UpgradeModal from '../../payment/components/UpgradeModal'
 
 const Home = () => {
   const { loading, generateReport, reports } = useInterview()
+  const { user, handleLogout } = useAuth()
   const [jobDescription, setJobDescription] = useState("")
   const [selfDescription, setSelfDescription] = useState("")
   const [selectedFileName, setSelectedFileName] = useState("")
   const resumeInputRef = useRef()
   const navigate = useNavigate()
+
+  // ── Plan / Subscription State ──────────────────────────────────────────────
+  const [planStatus, setPlanStatus] = useState(null)
+  // planStatus = { plan: 'free'|'pro', interviewsThisMonth: 2, freeLimit: 3, planExpiresAt }
+
+  // ── Upgrade Modal State ──────────────────────────────────────────────────
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false)
+  const [limitInfo, setLimitInfo] = useState({ used: 3, limit: 3, resetsAt: null })
+  // limitInfo tracks usage and reset date — displayed inside the modal
+
+  // Fetch the user's current plan when the page loads
+  useEffect(() => {
+    getPaymentStatus()
+      .then(data => setPlanStatus(data))
+      .catch(() => {}) // silently fail — plan info is non-critical
+  }, [])
 
   const handleFileChange = (e) => {
     const file = e.target.files[0]
@@ -21,24 +43,50 @@ const Home = () => {
   const handleGenerateReport = async () => {
     const resumeFile = resumeInputRef.current.files[0]
     if (!jobDescription.trim()) {
-      alert("Please enter a job description.")
+      toast.error("Please enter a job description.")
       return
     }
     if (!resumeFile && !selfDescription.trim()) {
-      alert("Please upload a resume or enter a self description.")
+      toast.error("Please upload a resume or enter a self description.")
       return
     }
     if (resumeFile && !resumeFile.name.endsWith(".pdf")) {
-      alert("Only PDF files are supported.")
+      toast.error("Only PDF files are supported.")
       return
     }
 
-    const data = await generateReport({ jobDescription, selfDescription, resumeFile })
+    const toastId = toast.loading("Analyzing your profile & generating strategy...");
 
-    if (data?._id) {
-      navigate(`/interview/${data._id}`)
-    } else {
-      alert("Something went wrong generating your report. Please try again.")
+    try {
+      const data = await generateReport({ jobDescription, selfDescription, resumeFile })
+
+      if (data?._id) {
+        toast.success("ATS Score and Report sent to your email!", { id: toastId })
+        // Refresh plan status so the usage badge updates
+        getPaymentStatus().then(d => setPlanStatus(d)).catch(() => {})
+        navigate(`/interview/${data._id}`)
+      } else {
+        toast.error("Something went wrong generating your report. Please try again.", { id: toastId })
+      }
+    } catch (err) {
+      toast.dismiss(toastId)
+
+      // ── Intercept FREE_LIMIT_REACHED ─────────────────────────────────────
+      // When the backend returns 403 + code: "FREE_LIMIT_REACHED"
+      // we show the 3D upgrade modal instead of a plain toast error
+      const serverCode = err?.response?.data?.code
+      if (serverCode === 'FREE_LIMIT_REACHED') {
+        const used     = err?.response?.data?.used     ?? 3
+        const limit    = err?.response?.data?.limit    ?? 3
+        const resetsAt = err?.response?.data?.resetsAt ?? null
+        setLimitInfo({ used, limit, resetsAt })
+        setShowUpgradeModal(true)
+        return
+      }
+
+      // All other errors — show as toast
+      const msg = err?.message || 'Something went wrong. Please try again.'
+      toast.error(msg)
     }
   }
 
@@ -50,8 +98,73 @@ const Home = () => {
     )
   }
 
+  const onLogout = async () => {
+    await handleLogout()
+    navigate('/login')
+  }
+
   return (
+    <>
+      {/* 3D Upgrade Modal — appears when free user hits the 3-report limit */}
+      <UpgradeModal
+        isOpen={showUpgradeModal}
+        onClose={() => setShowUpgradeModal(false)}
+        used={limitInfo.used}
+        limit={limitInfo.limit}
+        resetsAt={limitInfo.resetsAt}
+      />
+
     <div className='home-page'>
+
+      {/* Navbar */}
+      <nav className='navbar'>
+        <div className='navbar__brand'>
+          <span className='navbar__logo'>🤖</span>
+          <span className='navbar__title'>AI Interview Prep</span>
+        </div>
+        <div className='navbar__user'>
+
+          {/* Free tier usage badge */}
+          {planStatus && planStatus.plan === 'free' && (
+            <div className='plan-badge plan-badge--free'
+              title={`${planStatus.interviewsThisMonth}/${planStatus.freeLimit} reports used this month`}>
+              <span>🆓</span>
+              <span>{planStatus.interviewsThisMonth}/{planStatus.freeLimit} this month</span>
+            </div>
+          )}
+
+          {/* Pro badge */}
+          {planStatus && planStatus.plan === 'pro' && (
+            <div className='plan-badge plan-badge--pro' title='Pro Plan Active'>
+              <span>💎</span>
+              <span>Pro</span>
+            </div>
+          )}
+
+          {/* Upgrade button — only for free users */}
+          {planStatus && planStatus.plan === 'free' && (
+            <button
+              className='upgrade-btn'
+              onClick={() => navigate('/pricing')}
+              id='upgrade-to-pro-nav-btn'
+            >
+              ⚡ Upgrade to Pro
+            </button>
+          )}
+
+          {user?.avatar ? (
+            <img className='navbar__avatar' src={user.avatar} alt={user.username} referrerPolicy="no-referrer" />
+          ) : (
+            <div className='navbar__avatar navbar__avatar--placeholder'>
+              {user?.username?.[0]?.toUpperCase() || 'U'}
+            </div>
+          )}
+          <span className='navbar__username'>{user?.username || user?.email}</span>
+          <button id='logout-btn' className='navbar__logout-btn' onClick={onLogout}>
+            Logout
+          </button>
+        </div>
+      </nav>
 
       {/* Page Header */}
       <header className='page-header'>
@@ -104,10 +217,10 @@ const Home = () => {
                 <span className='dropzone__icon'>
                   <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="16 16 12 12 8 16" /><line x1="12" y1="12" x2="12" y2="21" /><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3" /></svg>
                 </span>
-                {/* Show selected filename so user knows file was picked. */}
+                {/*show selected filename so user knows file was picked */}
                 {selectedFileName ? (
                   <p className='dropzone__title' style={{ color: 'green' }}>
-                    Selected: {selectedFileName}
+                    ✓ {selectedFileName}
                   </p>
                 ) : (
                   <>
@@ -164,6 +277,9 @@ const Home = () => {
         </div>
       </div>
 
+      {/* Analytics Dashboard */}
+      <AnalyticsDashboard reports={reports} />
+
       {/* Recent Reports */}
 
       {reports?.length > 0 && (
@@ -195,11 +311,12 @@ const Home = () => {
 
       {/* Page Footer */}
       <footer className='page-footer'>
-        <a href='#'>Privacy Policy</a>
-        <a href='#'>Terms of Service</a>
-        <a href='#'>Help Center</a>
+        <Link to='/privacy'>Privacy Policy</Link>
+        <Link to='/terms'>Terms of Service</Link>
+        <Link to='/help'>Help Center</Link>
       </footer>
     </div>
+    </>
   )
 }
 

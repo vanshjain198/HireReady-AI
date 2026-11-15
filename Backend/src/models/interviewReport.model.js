@@ -1,27 +1,10 @@
 const mongoose = require('mongoose');
 
-
-const technicalQuestionSchema = new mongoose.Schema({
+// Shared schema for both technical and behavioral questions (identical structure)
+const questionSchema = new mongoose.Schema({
     question: {
         type: String,
-        required: [ true, "Technical question is required" ]
-    },
-    intention: {
-        type: String,
-        required: [ true, "Intention is required" ]
-    },
-    answer: {
-        type: String,
-        required: [ true, "Answer is required" ]
-    }
-}, {
-    _id: false
-})
-
-const behavioralQuestionSchema = new mongoose.Schema({
-    question: {
-        type: String,
-        required: [ true, "Technical question is required" ]
+        required: [ true, "Question is required" ]
     },
     intention: {
         type: String,
@@ -80,25 +63,8 @@ const interviewReportSchema = new mongoose.Schema({
         min: 0,
         max: 100,
     },
-    atsScore: {
-        type: Number,
-        min: 0,
-        max: 100,
-    },
-    atsSummary: {
-        type: String,
-    },
-    matchedKeywords: [ {
-        type: String,
-    } ],
-    missingKeywords: [ {
-        type: String,
-    } ],
-    atsSuggestions: [ {
-        type: String,
-    } ],
-    technicalQuestions: [ technicalQuestionSchema ],
-    behavioralQuestions: [ behavioralQuestionSchema ],
+    technicalQuestions: [ questionSchema ],
+    behavioralQuestions: [ questionSchema ],
     skillGaps: [ skillGapSchema ],
     preparationPlan: [ preparationPlanSchema ],
     user: {

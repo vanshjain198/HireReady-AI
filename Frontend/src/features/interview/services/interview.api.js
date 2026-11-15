@@ -1,8 +1,16 @@
 import axios from "axios";
 
 const api = axios.create({
-    baseURL: import.meta.env.VITE_API_URL || "http://localhost:3000",
+    baseURL: import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? "http://localhost:5050" : "https://genai-project-with-mern.onrender.com"),
     withCredentials: true,
+})
+
+api.interceptors.request.use((config) => {
+    const token = localStorage.getItem("token")
+    if (token) {
+        config.headers.Authorization = `Bearer ${token}`
+    }
+    return config
 })
 
 
@@ -13,7 +21,7 @@ export const generateInterviewReport = async ({ jobDescription, selfDescription,
 
     const formData = new FormData()
     formData.append("jobDescription", jobDescription)
-    formData.append("selfDescription", selfDescription)
+    formData.append("selfDescription", selfDescription || "")
     if (resumeFile) {
         formData.append("resume", resumeFile)
     }
@@ -50,37 +58,25 @@ export const getAllInterviewReports = async () => {
 
 
 /**
- * @description Service to generate resume pdf based on user self description, resume content and job description.
+ * @description Service to evaluate mock interview question answer.
  */
-export const generateResumePdf = async ({ interviewReportId }) => {
-    const response = await api.post(`/api/interview/resume/pdf/${interviewReportId}`, null, {
-        responseType: "blob"
-    })
-
-    return response.data
-}
-
-
-/**
- * @description Service to evaluate a mock interview answer for a report question.
- */
-export const evaluateMockInterviewAnswer = async ({ interviewReportId, questionType, questionIndex, answer }) => {
-    const response = await api.post(`/api/interview/mock/${interviewReportId}/evaluate`, {
-        questionType,
-        questionIndex,
-        answer
-    })
-
+export const evaluateInterviewAnswer = async ({ question, userAnswer, intention, modelAnswer }) => {
+    const response = await api.post("/api/interview/evaluate", { question, userAnswer, intention, modelAnswer })
     return response.data
 }
 
 /**
- * @description Submit a completed 6-8 question mock interview for its final evaluation.
+ * @description Service to send conversation history and get AI's follow-up voice-call reply.
  */
-export const completeMockInterview = async ({ interviewReportId, answers }) => {
-    const response = await api.post(`/api/interview/mock/${interviewReportId}/complete`, {
-        answers
-    })
+export const generateLiveVoiceChatReply = async ({ history, jobDescription, resume }) => {
+    const response = await api.post("/api/interview/chat", { history, jobDescription, resume })
+    return response.data
+}
 
+/**
+ * @description Service to send the full interview transcript to the user via email
+ */
+export const sendTranscriptEmail = async ({ transcript, role }) => {
+    const response = await api.post("/api/interview/send-transcript", { transcript, role })
     return response.data
 }

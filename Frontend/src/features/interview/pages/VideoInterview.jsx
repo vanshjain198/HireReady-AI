@@ -1,0 +1,497 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react'
+import '../style/videoInterview.scss'
+import { useInterview } from '../hooks/useInterview'
+import { generateLiveVoiceChatReply, evaluateInterviewAnswer, sendTranscriptEmail } from '../services/interview.api'
+import toast from 'react-hot-toast'
+
+import { useSpeechRecognition, isSpeechSupported } from '../hooks/useSpeechRecognition'
+import { useSilenceDetection } from '../hooks/useSilenceDetection'
+import { useSpeechSynthesis } from '../hooks/useSpeechSynthesis'
+
+const isCameraSupported = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
+
+const VideoInterview = () => {
+  const { report } = useInterview()
+
+  const [status, setStatus] = useState('idle') // 'idle' | 'connecting' | 'connected' | 'ended'
+  const [timer, setTimer] = useState(0)
+  const [history, setHistory] = useState([])
+  const [isGeneratingReply, setIsGeneratingReply] = useState(false)
+  const [isMuted, setIsMuted] = useState(false)
+  const [isCameraOff, setIsCameraOff] = useState(false)
+  const [evaluation, setEvaluation] = useState(null)
+  const [evaluating, setEvaluating] = useState(false)
+  const [error, setError] = useState('')
+
+  const videoRef = useRef(null)
+  const mediaStreamRef = useRef(null)
+  const historyRef = useRef([])
+  const statusRef = useRef(status)
+  const mutedRef = useRef(isMuted)
+
+  // Keep refs in sync for callbacks
+  useEffect(() => { historyRef.current = history }, [history])
+  useEffect(() => { statusRef.current = status }, [status])
+  useEffect(() => { mutedRef.current = isMuted }, [isMuted])
+
+  // Timer Effect
+  useEffect(() => {
+    let interval = null
+    if (status === 'connected') {
+      interval = setInterval(() => {
+        setTimer(prev => prev + 1)
+      }, 1000)
+    } else {
+      setTimer(0)
+    }
+    return () => clearInterval(interval)
+  }, [status])
+
+  // Attach camera stream to video element once it renders
+  useEffect(() => {
+    if (status === 'connected' && videoRef.current && mediaStreamRef.current) {
+      videoRef.current.srcObject = mediaStreamRef.current
+    }
+  }, [status])
+
+  const formatTime = (secs) => {
+    const mins = Math.floor(secs / 60)
+    const remaining = secs % 60
+    return `${mins.toString().padStart(2, '0')}:${remaining.toString().padStart(2, '0')}`
+  }
+
+  const stopCamera = () => {
+    mediaStreamRef.current?.getTracks().forEach(track => track.stop())
+    mediaStreamRef.current = null
+    if (videoRef.current) {
+      videoRef.current.srcObject = null
+    }
+  }
+
+  const startCamera = async () => {
+    if (!isCameraSupported) {
+      throw new Error('Camera tools are not supported in this browser.')
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
+      audio: false
+    })
+    mediaStreamRef.current = stream
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream
+    }
+  }
+
+  // --- HOOKS ---
+
+  const startSilenceTimerRef = useRef(() => {})
+
+  const {
+    isListening,
+    currentSpeechText,
+    setCurrentSpeechText,
+    startRecognition,
+    stopRecognition,
+    recognitionRef
+  } = useSpeechRecognition({
+    onSpeechResult: (text) => {
+      startSilenceTimerRef.current(text)
+    }
+  })
+
+  const { isAiSpeaking, aiSubtitle, speakText, cancelSpeech, skipSpeech } = useSpeechSynthesis({
+    onSpeechEnd: () => {
+      if (statusRef.current === 'connected' && !mutedRef.current) {
+        startRecognition()
+      }
+    }
+  })
+
+  const handleUserAnswerSubmitted = useCallback(async (text) => {
+    const userMsg = { role: 'user', text }
+    const updatedHistory = [...historyRef.current, userMsg]
+    setHistory(updatedHistory)
+    setCurrentSpeechText('')
+    setError('')
+
+    try {
+      setIsGeneratingReply(true)
+      const data = await generateLiveVoiceChatReply({
+        history: updatedHistory,
+        jobDescription: report?.jobDescription || '',
+        resume: report?.resume || ''
+      })
+      
+      const aiMsg = { role: 'model', text: data.reply }
+      setHistory(prev => [...prev, aiMsg])
+
+      if (statusRef.current === 'connected' && !mutedRef.current) {
+        speakText(data.reply)
+      }
+    } catch (err) {
+      console.error(err)
+      toast.error('Failed to get AI response.')
+      if (statusRef.current === 'connected' && !mutedRef.current) {
+        startRecognition()
+      }
+    } finally {
+      setIsGeneratingReply(false)
+    }
+  }, [report?.jobDescription, report?.resume, speakText, cancelSpeech, setCurrentSpeechText, startRecognition])
+  
+  const handleUserAnswerSubmittedRef = useRef(handleUserAnswerSubmitted)
+  useEffect(() => {
+    handleUserAnswerSubmittedRef.current = handleUserAnswerSubmitted
+  }, [handleUserAnswerSubmitted])
+
+  const { startSilenceTimer, clearSilenceTimer, lastSpeechTextRef } = useSilenceDetection({
+    delay: 4000,
+    onSilenceTimeout: (text) => {
+      if (statusRef.current === 'connected' && !mutedRef.current) {
+        stopRecognition()
+        handleUserAnswerSubmittedRef.current(text)
+      }
+    }
+  })
+
+  useEffect(() => {
+    startSilenceTimerRef.current = startSilenceTimer
+  }, [startSilenceTimer])
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => stopCamera()
+  }, [])
+
+  // --- ACTIONS ---
+
+  const handleStartInterview = async () => {
+    if (!isSpeechSupported) {
+      setError('Speech tools are not supported in this browser. Please use Google Chrome.')
+      return
+    }
+
+    setError('')
+    setEvaluation(null)
+    setHistory([])
+    setCurrentSpeechText('')
+    setIsMuted(false)
+    setIsCameraOff(false)
+    setStatus('connecting')
+
+    try {
+      await startCamera()
+      setStatus('connected')
+
+      const initialGreeting = `Hello, welcome to your AI video interview for the ${report?.title || 'role'}. I will ask follow-up questions like a real interviewer. Please look at the camera and start by introducing yourself.`
+      const greetingMsg = { role: 'model', text: initialGreeting }
+
+      setHistory([greetingMsg])
+      speakText(initialGreeting)
+    } catch (err) {
+      console.error(err)
+      setStatus('idle')
+      setError('Camera permission is required to start the video interview.')
+      stopCamera()
+    }
+  }
+
+  const handleManualSubmit = useCallback(() => {
+    clearSilenceTimer()
+    const text = lastSpeechTextRef.current.trim()
+    if (!text) return
+    stopRecognition()
+    handleUserAnswerSubmitted(text)
+  }, [clearSilenceTimer, stopRecognition, handleUserAnswerSubmitted, lastSpeechTextRef])
+
+  const handleToggleMute = () => {
+    const nextMuted = !isMuted
+    setIsMuted(nextMuted)
+
+    if (nextMuted) {
+      stopRecognition()
+    } else if (status === 'connected' && !isAiSpeaking && !isGeneratingReply) {
+      startRecognition()
+    }
+  }
+
+  const handleToggleCamera = () => {
+    const nextCameraOff = !isCameraOff
+    setIsCameraOff(nextCameraOff)
+    mediaStreamRef.current?.getVideoTracks().forEach(track => {
+      track.enabled = !nextCameraOff
+    })
+  }
+
+  const handleEndInterview = () => {
+    setStatus('ended')
+    cancelSpeech()
+    clearSilenceTimer()
+    stopRecognition()
+    stopCamera()
+    setIsGeneratingReply(false)
+
+    // Automatically send the transcript email when the video interview ends!
+    if (historyRef.current.length > 0) {
+      const toastId = toast.loading("Emailing your interview transcript...");
+      sendTranscriptEmail({
+        transcript: historyRef.current,
+        role: report?.jobPosition || "Software Engineer"
+      }).then(() => {
+        toast.success("Transcript sent to your email!", { id: toastId });
+      }).catch((err) => {
+        toast.error("Failed to send transcript.", { id: toastId });
+      });
+    }
+  }
+
+  const handleEvaluateInterview = async () => {
+    if (history.length < 2) {
+      setError('The video interview was too short to evaluate.')
+      return
+    }
+
+    setError('')
+    setEvaluating(true)
+
+    const transcriptText = history
+      .map(msg => `${msg.role === 'user' ? 'Candidate' : 'Interviewer'}: ${msg.text}`)
+      .join('\n')
+
+    try {
+      const data = await evaluateInterviewAnswer({
+        question: `Video interview review for ${report?.title || 'Job position'}.`,
+        userAnswer: transcriptText,
+        intention: 'Evaluate camera interview communication, structure, clarity, confidence, and role fit.',
+        modelAnswer: 'A strong candidate gives direct answers, uses examples, maintains professional pacing, and asks thoughtful follow-up questions.'
+      })
+
+      setEvaluation(data.evaluation)
+    } catch (err) {
+      console.error(err)
+      setError(err.response?.data?.message || 'Failed to generate the video interview report. Please try again.')
+    } finally {
+      setEvaluating(false)
+    }
+  }
+
+  const connectionStatus = () => {
+    if (isAiSpeaking) return 'AI interviewer is speaking'
+    if (isListening) return 'Listening to your answer'
+    if (isGeneratingReply) return 'Preparing the next question'
+    return 'Ready'
+  }
+
+  return (
+    <div className="video-interview-section">
+      <div className="content-header">
+        <h2>Real-Time AI Video Interview</h2>
+        <span className="content-header__count">Camera + Voice</span>
+      </div>
+
+      {!isSpeechSupported && (
+        <div className="q-card" style={{ borderLeft: '4px solid #ef4444', marginBottom: '24px' }}>
+          <div className="q-card__body">
+            <h3 style={{ color: '#ef4444', marginBottom: '8px' }}>⚠️ Browser Not Supported</h3>
+            <p style={{ color: '#9ca3af', lineHeight: '1.6' }}>
+              Your current browser does not support the Web Speech API required for video interviews. 
+              Please switch to <strong>Google Chrome</strong> or <strong>Microsoft Edge</strong> on a desktop to use this feature.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {isSpeechSupported && status === 'idle' && (
+        <div className="video-lobby">
+          <div className="video-lobby__preview">
+            <div className="video-lobby__avatar">AI</div>
+            <div className="video-lobby__scanline" />
+          </div>
+          <div className="video-lobby__copy">
+            <h3>Practice in a video-call interview room</h3>
+            <p>
+              Start a camera interview with an AI hiring manager, live voice questions, subtitles, transcript, and a final communication report.
+            </p>
+            {error && <p className="video-error">{error}</p>}
+            <button onClick={handleStartInterview} className="button primary-button video-start-btn">
+              Start Video Interview
+            </button>
+          </div>
+        </div>
+      )}
+
+      {status === 'connecting' && (
+        <div className="video-connecting">
+          <div className="video-loader" />
+          <h3>Joining interview room</h3>
+          <p>Allow camera permission when your browser asks.</p>
+          <button onClick={handleEndInterview} className="video-control danger">
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {status === 'connected' && (
+        <div className="video-room">
+          <div className="video-room__topbar">
+            <div>
+              <span className="video-room__eyebrow">Live interview</span>
+              <strong>{report?.title || 'AI Interview'}</strong>
+            </div>
+            <span className="video-room__timer">{formatTime(timer)}</span>
+          </div>
+
+          <div className="video-grid">
+            <div className={`ai-video-tile ${isAiSpeaking ? 'speaking' : ''} ${isGeneratingReply ? 'thinking' : ''}`}>
+              <div className="ai-face">
+                <span>AI</span>
+                <div className="ai-face__ring" />
+              </div>
+              <div className="ai-wave">
+                <span />
+                <span />
+                <span />
+                <span />
+                <span />
+              </div>
+              <div className="tile-footer">
+                <span>AI Interviewer</span>
+                <strong>{connectionStatus()}</strong>
+              </div>
+            </div>
+
+            <div className={`candidate-video-tile ${isCameraOff ? 'camera-off' : ''}`}>
+              <video ref={videoRef} autoPlay muted playsInline className="candidate-video" />
+              {isCameraOff && (
+                <div className="camera-off-overlay">
+                  <span>You</span>
+                  <p>Camera is off</p>
+                </div>
+              )}
+              <div className="tile-footer">
+                <span>You</span>
+                <strong>{isMuted ? 'Muted' : isListening ? 'Answering' : 'Camera ready'}</strong>
+              </div>
+            </div>
+          </div>
+
+          <div className="live-caption-panel">
+            <div className="caption-block">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span>AI Subtitle</span>
+                {isAiSpeaking && (
+                  <button 
+                    onClick={skipSpeech}
+                    style={{ 
+                      padding: '0.2rem 0.6rem', 
+                      fontSize: '0.75rem', 
+                      background: 'rgba(255,255,255,0.08)', 
+                      border: '1px solid rgba(255,255,255,0.2)', 
+                      borderRadius: '4px', 
+                      color: '#93c5fd', 
+                      cursor: 'pointer' 
+                    }}
+                  >
+                    ⏩ Skip speech
+                  </button>
+                )}
+              </div>
+              <p>{aiSubtitle || 'The interviewer subtitles will appear here while AI is speaking.'}</p>
+            </div>
+            <div className="caption-block candidate-caption">
+              <span>Your Live Transcript</span>
+              <p>{currentSpeechText || 'Your spoken answer appears here as the microphone listens.'}</p>
+            </div>
+          </div>
+
+          {error && <p className="video-error">{error}</p>}
+
+          <div className="video-controls">
+            <button onClick={handleToggleMute} className={`video-control ${isMuted ? 'active' : ''}`}>
+              {isMuted ? 'Unmute' : 'Mute'}
+            </button>
+            <button onClick={handleToggleCamera} className={`video-control ${isCameraOff ? 'active' : ''}`}>
+              {isCameraOff ? 'Camera On' : 'Camera Off'}
+            </button>
+            {isListening && !isAiSpeaking && !isGeneratingReply && currentSpeechText && (
+              <button onClick={handleManualSubmit} className="video-control done-answer-btn">
+                ✅ Done Answering
+              </button>
+            )}
+            <button onClick={handleEndInterview} className="video-control danger">
+              End Interview
+            </button>
+          </div>
+          {isListening && !isAiSpeaking && !isGeneratingReply && (
+            <p className="silence-hint">⏱ Auto-submits after 4s of silence, or click Done Answering</p>
+          )}
+        </div>
+      )}
+
+      {status === 'ended' && (
+        <div className="video-summary">
+          <div className="video-summary__badge">Interview completed</div>
+          <h3>Video Interview Report</h3>
+          <p>
+            Review the transcript and generate a final score for communication, structure, confidence, and answer quality.
+          </p>
+
+          <div className="video-summary__actions">
+            <button onClick={handleEvaluateInterview} className="button primary-button" disabled={evaluating}>
+              {evaluating ? 'Analyzing Interview...' : 'Evaluate Video Interview'}
+            </button>
+            <button onClick={handleStartInterview} className="button secondary-button">
+              Restart Interview
+            </button>
+          </div>
+
+          {error && <p className="video-error">{error}</p>}
+
+          {evaluation && (
+            <div className="video-evaluation-card">
+              <div className="video-evaluation-card__score">
+                <span>{evaluation.score}%</span>
+                <p>{evaluation.score >= 80 ? 'Strong video interview performance' : evaluation.score >= 60 ? 'Good foundation with clear improvement areas' : 'Needs more structured practice'}</p>
+              </div>
+
+              {evaluation.fillerWords?.length > 0 && (
+                <div className="video-eval-section">
+                  <strong>Filler words</strong>
+                  <div className="video-filler-list">
+                    {evaluation.fillerWords.map((word, index) => (
+                      <span key={index}>{word}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="video-eval-section">
+                <strong>Feedback</strong>
+                <p>{evaluation.feedback}</p>
+              </div>
+
+              <div className="video-eval-section">
+                <strong>Improved response style</strong>
+                <p>{evaluation.betterAnswer}</p>
+              </div>
+            </div>
+          )}
+
+          <div className="video-transcript">
+            <h4>Interview Transcript</h4>
+            <div className="video-transcript__list">
+              {history.map((msg, index) => (
+                <div key={index} className={`video-transcript__bubble ${msg.role === 'user' ? 'user' : 'model'}`}>
+                  <span>{msg.role === 'user' ? 'You' : 'AI Interviewer'}</span>
+                  <p>{msg.text}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default VideoInterview
